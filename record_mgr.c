@@ -20,6 +20,18 @@ typedef struct __attribute__((packed)) RM_RecordController
 } RM_RecordController;
 
 RM_RecordController *recController;
+// This function returns a free slot within a page
+int findFreeSlot(char *data, int recordSize)
+{
+    int i = 0;
+    while (i < (PAGE_SIZE / recordSize))
+    {
+        if (data[recordSize * i] != '+')
+            return i;
+        i++;
+    }
+    return -1;
+}
 
 int checkRecordInitFlag()
 {
@@ -174,24 +186,23 @@ extern RC openTable(RM_TableData *rel, char *name)
     // Get the free page number from the page file
     recController->freePagesNum = *pageHandle;
     pageHandle += sz;
-    
-        // Set the management data pointer of the table data structure
-        rel->mgmtData = (RM_RecordController *)recController;
 
-        // Set the table name in the table data structure
-        rel->name = name;
+    // Set the management data pointer of the table data structure
+    rel->mgmtData = (RM_RecordController *)recController;
 
-        // Get the schema for the table by parsing the page data
-        rel->schema = getSchema(pageHandle);
+    // Set the table name in the table data structure
+    rel->name = name;
 
-        // Unpin the first page of the table
-        printf("\n UNPINNING PAGE \n");
-        unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle);
+    // Get the schema for the table by parsing the page data
+    rel->schema = getSchema(pageHandle);
 
-        // Force the changes to be written to disk
-        printf("\n WRITING CHANGES TO DISK \n");
-        forcePage(&recController->buffPoolMgmt, &recController->bmPageHandle);
-    
+    // Unpin the first page of the table
+    printf("\n UNPINNING PAGE \n");
+    unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle);
+
+    // Force the changes to be written to disk
+    printf("\n WRITING CHANGES TO DISK \n");
+    forcePage(&recController->buffPoolMgmt, &recController->bmPageHandle);
 
     return RC_OK;
 }
@@ -208,7 +219,7 @@ extern RC closeTable(RM_TableData *rel)
 // Deletes a table with the given name after all the operations to be performed are done.
 extern RC deleteTable(char *name)
 {
-    return destroyPageFile(name);
+    return destroyPageFile((char *)name);
 }
 
 // Retrieve the Total Number of Tuples in the Table
@@ -217,136 +228,374 @@ extern int getNumTuples(RM_TableData *rel)
     return ((RM_RecordController *)rel->mgmtData)->totalRecordCount;
 }
 
+//************************************************************************************************************************************************************
+// insertRecord() inserts a new Record (record) into the table (rel).
+extern RC insertRecord(RM_TableData *rel, Record *record)
+{
+    RC RC_code = RC_OK;
+    int recordSize;
+    RM_RecordController *recController = rel->mgmtData;
+    int sz = getRecordSize(rel->schema);
+    if (sz >= 0)
+        recordSize = sz;
 
-// dealing with records and attribute values
-// Function to create a new record
-extern RC createRecord(Record **record, Schema *schema) {
-    if (!schema) return RC_INVALID_INPUTS; 
+    RID *rid = &record->id;
+    rid->page = recController->freePagesNum;
 
-    // Allocate memory for the Record structure
-    *record = (Record *)calloc(1, sizeof(Record));
-    if (*record == NULL) return RC_MEM_ALLOC_FAILED;
-    
-    int size = getRecordSize(schema);
-    
-    // Allocate memory for the data field to hold the binary representation of all attributes
-    (*record)->data = (char *)malloc(size);
-    if ((*record)->data == NULL) {
-        free(*record); // Clean up previously allocated memory for the Record structure
-        return RC_MEM_ALLOC_FAILED; // Error handling
+    if (pinPage(&recController->buffPoolMgmt, &recController->bmPageHandle, rid->page) == RC_OK)
+    {
+        char *dataInsert = recController->bmPageHandle.data;
+
+        int fSlot = findFreeSlot(dataInsert, recordSize);
+        if (fSlot >= 0)
+            rid->slot = fSlot;
+        while (rid->slot == -1)
+        {
+
+            if (unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+            {
+                rid->page += 1;
+                if (pinPage(&recController->buffPoolMgmt, &recController->bmPageHandle, rid->page) == RC_OK)
+                {
+                    dataInsert = recController->bmPageHandle.data;
+                    rid->slot = findFreeSlot(dataInsert, recordSize);
+                }
+                else
+                {
+                    printf("FATAL: FAILED TO ENTER");
+                    return RC_ERROR;
+                }
+            }
+        }
+        if (markDirty(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+        {
+            char *freeSlotPtr = dataInsert + (rid->slot * recordSize);
+            *freeSlotPtr = '+'; // Mark as free
+            memcpy(++freeSlotPtr, record->data + 1, recordSize - 1);
+
+            if (unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+            {
+                recController->totalRecordCount++;
+                if (pinPage(&recController->buffPoolMgmt, &recController->bmPageHandle, 0) == RC_OK)
+                    return RC_OK;
+            }
+            else
+            {
+                return RC_ERROR;
+            }
+
+            return RC_code;
+        }
     }
-    
-    // Initialize the data field to default values based on the attribute types
-    memset((*record)->data, 0, size); 
-    
-    return RC_OK; // Indicate success
 }
 
-//Clearing up the record created earlier
-extern RC freeRecord(Record *record) {
-    if (record != NULL) {
-        // Initially, release the memory allocated for the record's data field, if it has been allocated
-        if (record->data != NULL) {
-            free(record->data);
-            record->data = NULL; // Reset to NULL to prevent usage of a freed pointer
+// The "deleteRecord" function is to delete the existing record from the table.
+extern RC deleteRecord(RM_TableData *rel, RID id)
+{
+    int recordSize;
+    // Getting our details from mgmtData
+    RM_RecordController *recController = (RM_RecordController *)rel->mgmtData;
+
+    // Pinning the page to update
+    if (pinPage(&recController->buffPoolMgmt, &recController->bmPageHandle, id.page) == RC_OK)
+    {
+        // get size of corresponding record
+        int rsize = getRecordSize(rel->schema);
+        if (rsize != NULL)
+        {
+            recordSize = rsize;
         }
 
-        // Next, release the memory of the Record's main structure
-        free(record);
-        record = NULL; // Reset to NULL to ensure the pointer is no longer used
+        recController->freePagesNum = id.page;
+        char *size= (id.slot * recordSize);
+        char *data = recController->bmPageHandle.data;
+        data = data + (int)size;
+        // Deleted Record Demarkation using - [TOMBSTONE] ☠️
+        *data = '-';
+
+        // Marking page dirty
+        if (markDirty(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+        {
+            // Unpinning the page
+            unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle);
+        }
+        else
+        {
+            return RC_FATAL_ERROR;
+        }
+    }
+
+    return RC_OK;
+}
+
+// The "getRecord" function is to retrieve the existing record from the table.
+extern RC getRecord(RM_TableData *rel, RID id, Record *record)
+{
+    // Getting our details from mgmtData
+    RM_RecordController *recController = rel->mgmtData;
+
+    // Pinning the page to update
+    if (pinPage(&recController->buffPoolMgmt, &recController->bmPageHandle, id.page) == RC_OK)
+    {
+        char *dataPtr = recController->bmPageHandle.data;
+
+        // get size of corresponding record
+        int recordSize = getRecordSize(rel->schema);
+        int offset = id.slot * recordSize;
+        dataPtr = dataPtr + offset;
+
+        // Check if no record matches
+        if (*dataPtr != '+')
+        {
+            return RC_RM_NO_TUPLE_WITH_GIVEN_RID;
+        }
+        else
+        {
+            record->id = id;
+            char *data = record->data;
+
+            // Copying data
+            data += 1;
+            memcpy(data, dataPtr + 1, recordSize - 1);
+        }
+
+        // Unpinning the page
+        if (unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+        {
+            return RC_OK;
+        }
+    }
+
+    return RC_OK;
+}
+
+// The function is used to update a Record
+extern RC updateRecord(RM_TableData *rel, Record *rec)
+{
+    RM_RecordController *recController = rel->mgmtData;
+    if (pinPage(&recController->buffPoolMgmt, &recController->bmPageHandle, rec->id.page) == RC_OK)
+    {
+        int recordSize = getRecordSize(rel->schema);
+        RID id = rec->id;
+        int offset = id.slot * recordSize;
+        char *data = recController->bmPageHandle.data;
+        data = data + offset;
+
+        *data = '+';
+
+        memcpy(++data, rec->data + 1, recordSize - 1);
+
+        if (markDirty(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+        {
+            if (unpinPage(&recController->buffPoolMgmt, &recController->bmPageHandle) == RC_OK)
+            {
+                return RC_OK;
+            }
+        }
     }
     return RC_OK;
 }
 
-// function to calculate the offset of an attribute in the record's data
-RC calAttrOffset(Schema *schema, int attrNum) {
-    int offset = 0;
-    for(int i = 0; i < attrNum; i++) {
-        switch(schema->dataTypes[i]) {
-            case DT_INT: offset += sizeof(int); break;
-            case DT_STRING: offset += schema->typeLength[i]; break;
-            case DT_FLOAT: offset += sizeof(float); break;
-            case DT_BOOL: offset += sizeof(bool); break;
-        }
+// This function creates a new record in the schema
+extern RC createRecord(Record **record, Schema *schema)
+{
+    RC returnCode = RC_OK;
+    int recordSize;
+    int rSize = getRecordSize(schema);
+    if (rSize >= 0)
+    {
+        recordSize = rSize;
+        Record *newrec = malloc(sizeof(Record));
+        newrec->data = (char *)malloc(recordSize);
+        newrec->id.page = -1;
+        newrec->id.slot = -1;
+
+        char *dataptr = newrec->data;
+
+        *dataptr = '-';
+        dataptr++;
+        *(dataptr) = '\0';
+        *record = newrec;
     }
-    return offset;
+    return returnCode;
 }
 
-// Function to get an attribute value from a record
-extern RC getAttr(Record *record, Schema *schema, int attrNum, Value **value) {
-    if (!record || !schema || attrNum < 0 || attrNum >= schema->numAttr) {
-        return RC_INVALID_INPUTS; 
+// ing the record created earlier
+extern RC freeRecord(Record *record)
+{
+    if (record != NULL)
+    {
+        record = NULL;
+        free(record);
     }
+    return RC_OK;
+}
 
-    int offset;
-    offset = calAttrOffset(schema, attrNum); 
+// This method is used to calculate the Offset associated
+RC attrOffset(Schema *schema, int attrNum, int *res)
+{
+    int szInt = sizeof(int);
+    int szBool = sizeof(bool);
+    int szFloat = sizeof(float);
 
-    *value = (Value *)malloc(sizeof(Value)); // Allocates the Value structure.
-    if (*value == NULL) return RC_MEM_ALLOC_FAILED; // Checks for successful allocation.
+    int iter = 0;
+    *res = 1;
 
-    char *dataptr = record->data + offset; 
-
-    // Retrieves and assigns the attribute value based on its data type.
-    switch (schema->dataTypes[attrNum]) {
-        case DT_INT:
-            (*value)->v.intV = *(int *)dataptr; 
-            break;
+    while (iter < attrNum)
+    {
+        DataType ch = schema->dataTypes[iter];
+        // Switch depending on DATA TYPE of the ATTRIBUTE
+        switch (ch)
+        {
         case DT_STRING:
+            //  Value is Length of Defined string
+            *res = *res + schema->typeLength[iter];
+            if (*res >= -1)
             {
-                int length = schema->typeLength[attrNum];
-                (*value)->v.stringV = (char *)malloc(length + 1); // Includes space for null terminator.
-                if ((*value)->v.stringV == NULL) {
-                    free(*value); // Frees Value structure on allocation failure.
-                    return RC_MEM_ALLOC_FAILED;
-                }
-                strncpy((*value)->v.stringV, dataptr, length);
-                (*value)->v.stringV[length] = '\0'; // Ensures null-termination.
+                printf("Valid!\n");
+            }
+            break;
+        case DT_BOOL:
+            // Adding size of BOOLEAN
+            *res = *res + szBool;
+            if (*res >= -1)
+            {
+                printf("Valid!\n");
             }
             break;
         case DT_FLOAT:
-            (*value)->v.floatV = *(float *)dataptr; 
+            // Adding size of FLOAT
+            *res = *res + szFloat;
+            if (*res >= -1)
+            {
+                printf("Valid!\n");
+            }
             break;
-        case DT_BOOL:
-            (*value)->v.boolV = *(bool *)dataptr; 
-            break;
-        default:
-            free(*value); // Handles undefined data types.
-            return RC_INVALID_DATATYPE;
-    }
-    (*value)->dt = schema->dataTypes[attrNum]; // Sets the data type of the value.
 
+        case DT_INT:
+            // Adding size of INT
+            *res = *res + szInt;
+            if (*res >= -1)
+            {
+                printf("Valid!\n");
+            }
+            break;
+        }
+        iter++;
+    }
     return RC_OK;
 }
 
+// This function is used to get the attribute values of a record
+extern RC getAttr(Record *rec, Schema *schema, int attrNum, Value **value)
+{
+    int offset = 0;
 
-// Function to set an attribute value in a record
-extern RC setAttr(Record *record, Schema *schema, int attrNum, Value *value) {
-    if (!record || !schema || attrNum < 0 || attrNum >= schema->numAttr) {
-        return RC_INVALID_INPUTS;
+    if (attrOffset(schema, attrNum, &offset))
+    {
+        printf("OFFSET CALCULATED SUCCESSFULLY!\n");
     }
 
-    int offset = calAttrOffset(schema, attrNum);
-
-    switch(value->dt) {
-        case DT_INT:
-            memcpy(record->data + offset, &(value->v.intV), sizeof(int));
-            break;
-
-        case DT_STRING:
-            memcpy(record->data + offset, value->v.stringV, schema->typeLength[attrNum]);
-            break;
-
-        case DT_FLOAT:
-            memcpy(record->data + offset, &(value->v.floatV), sizeof(float));
-            break;
-
-        case DT_BOOL:
-            memcpy(record->data + offset, &(value->v.boolV), sizeof(bool));
-            break;
-
-        default:
-            return RC_INVALID_DATATYPE; 
+    Value *attr = (Value *)malloc(sizeof(Value));
+    char *dataptr = rec->data;
+    dataptr = dataptr + offset;
+    if (attrNum == 1)
+    {
+        schema->dataTypes[attrNum] = DT_STRING;
     }
-    
-    return RC_OK; 
+    else
+        schema->dataTypes[attrNum];
+
+    if (schema->dataTypes[attrNum] == DT_INT)
+    {
+        // Retriving attribute value of type Int
+        int value = 0;
+        memcpy(&value, dataptr, sizeof(int));
+        attr->v.intV = value;
+        attr->dt = DT_INT;
+    }
+    else if (schema->dataTypes[attrNum] == DT_STRING)
+    {
+        // Retriving attribute value of type String
+        int length = schema->typeLength[attrNum];
+        // creating space for string
+        attr->dt = schema->dataTypes[attrNum];
+        attr->v.stringV = malloc(length + 1);
+        if (attr->v.stringV != NULL) {
+            memcpy(attr->v.stringV, dataptr, length);
+            attr->v.stringV[length] = '\0'; // Null terminator 
+        }
+
+    }
+    else if (schema->dataTypes[attrNum] == DT_FLOAT)
+    {
+        // Retriving attribute value of type FLoat
+        float value;
+        memcpy(&value, dataptr, sizeof(float));
+        attr->v.floatV = value;
+        attr->dt = DT_FLOAT;
+    }
+    else if (schema->dataTypes[attrNum] == DT_FLOAT == DT_BOOL)
+    {
+        // Retriving attribute value of type Bool
+        bool value;
+        memcpy(&value, dataptr, sizeof(bool));
+        attr->v.boolV = value;
+        attr->dt = DT_BOOL;
+    }
+    else
+    {
+        printf("Undefined DataType \n");
+    }
+
+    *value = attr;
+    return RC_OK;
+}
+
+// This function is used to get the attribute values of a record
+extern RC setAttr(Record *rec, Schema *schema, int attrNum, Value *value)
+{
+    int offset = 0;
+
+    if (attrOffset(schema, attrNum, &offset) == RC_OK)
+    {
+        char *dataptr = rec->data;
+        dataptr = dataptr + offset;
+
+        if (schema->dataTypes[attrNum] == DT_INT)
+        {
+            *dataptr = value->v.intV;
+            dataptr = dataptr + sizeof(int);
+        }
+        else if (schema->dataTypes[attrNum] == DT_STRING)
+        {
+            int length = schema->typeLength[attrNum];
+            strncpy(dataptr, value->v.stringV, length);
+            length = schema->typeLength[attrNum];
+            dataptr = dataptr + length;
+        }
+        else if (schema->dataTypes[attrNum] == DT_FLOAT)
+        {
+            // Setting attribute value of an attribute of type FLOAT
+            *dataptr = value->v.floatV;
+            dataptr = dataptr + sizeof(float);
+        }
+
+        else if (schema->dataTypes[attrNum] == DT_BOOL)
+        {
+            *dataptr = value->v.boolV;
+            dataptr = dataptr + sizeof(bool);
+        }
+        else
+        {
+            printf("SERIALIZER NOT DEFINED \n");
+            return RC_SERIALIZER_ERROR;
+        }
+    }
+    else
+    {
+        return RC_SERIALIZER_ERROR;
+    }
+
+    return RC_OK;
 }
