@@ -599,3 +599,22 @@ extern RC setAttr(Record *rec, Schema *schema, int attrNum, Value *value)
 
     return RC_OK;
 }
+
+
+//Deletes a record from the table
+extern RC deleteRecord(RM_TableData *rel, RID id)
+{
+	RM_RecordController *recCont = (RM_RecordController *)rel->mgmtData;
+	pinPage(&recCont->buffPoolMgmt, &recCont->bmPageHandle, id.page);
+	
+	recCont->freePagesNum = id.page;
+    int recMag = getRecordSize(rel->schema);
+	char *d = recCont->bmPageHandle.data;
+	d = d + (id.slot * recMag);
+	*d = 'Deleted';
+
+	markDirty(&recCont->buffPoolMgmt, &recCont->bmPageHandle);
+	unpinPage(&recCont->buffPoolMgmt, &recCont->bmPageHandle);
+
+	return RC_OK;
+}
