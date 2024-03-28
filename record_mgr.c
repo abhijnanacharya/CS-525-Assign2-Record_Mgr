@@ -618,3 +618,34 @@ extern RC deleteRecord(RM_TableData *rel, RID id)
 
 	return RC_OK;
 }
+
+// This function updates a record in the table
+extern RC updateRecord(RM_TableData *table, Record *record)
+{
+    // Access the record management controller from the table management data
+    RM_RecordController *recCont = (RM_RecordController *)table->mgmtData;
+    // Pin the page where the record to be updated resides
+    pinPage(&recCont->buffPoolMgmt, &recCont->bmPageHandle, record->id.page);
+    
+    // Get the size of each record in the table
+    int recordSize = getRecordSize(table->schema);
+    // Retrieve the record ID
+    RID recordID = record->id;
+    
+    // Get a pointer to the data of the pinned page at the slot where the record resides
+    char *d = recCont->bmPageHandle.data;
+    d = d + recordID.slot * recordSize;
+    
+    // Mark the slot as occupied
+    *d = 'Updated';
+    
+    // Copy the updated record data into the page, excluding the first byte
+    memcpy(++d, record->data + 1, recordSize - 1);
+    
+    // Mark the page as dirty since it's been modified
+    markDirty(&recCont->buffPoolMgmt, &recCont->bmPageHandle);
+
+    // Unpin the page
+    unpinPage(&recCont->buffPoolMgmt, &recCont->bmPageHandle);
+    return RC_OK; // Return OK status
+}
