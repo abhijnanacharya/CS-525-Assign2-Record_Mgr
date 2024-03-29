@@ -217,3 +217,136 @@ extern int getNumTuples(RM_TableData *rel)
     return ((RM_RecordController *)rel->mgmtData)->totalRecordCount;
 }
 
+
+// dealing with records and attribute values
+// Function to create a new record
+extern RC createRecord(Record **record, Schema *schema) {
+    if (!schema) return RC_INVALID_INPUTS; 
+
+    // Allocate memory for the Record structure
+    *record = (Record *)calloc(1, sizeof(Record));
+    if (*record == NULL) return RC_MEM_ALLOC_FAILED;
+    
+    int size = getRecordSize(schema);
+    
+    // Allocate memory for the data field to hold the binary representation of all attributes
+    (*record)->data = (char *)malloc(size);
+    if ((*record)->data == NULL) {
+        free(*record); // Clean up previously allocated memory for the Record structure
+        return RC_MEM_ALLOC_FAILED; // Error handling
+    }
+    
+    // Initialize the data field to default values based on the attribute types
+    memset((*record)->data, 0, size); 
+    
+    return RC_OK; // Indicate success
+}
+
+//Clearing up the record created earlier
+extern RC freeRecord(Record *record) {
+    if (record != NULL) {
+        // Initially, release the memory allocated for the record's data field, if it has been allocated
+        if (record->data != NULL) {
+            free(record->data);
+            record->data = NULL; // Reset to NULL to prevent usage of a freed pointer
+        }
+
+        // Next, release the memory of the Record's main structure
+        free(record);
+        record = NULL; // Reset to NULL to ensure the pointer is no longer used
+    }
+    return RC_OK;
+}
+
+// function to calculate the offset of an attribute in the record's data
+RC calAttrOffset(Schema *schema, int attrNum) {
+    int offset = 0;
+    for(int i = 0; i < attrNum; i++) {
+        switch(schema->dataTypes[i]) {
+            case DT_INT: offset += sizeof(int); break;
+            case DT_STRING: offset += schema->typeLength[i]; break;
+            case DT_FLOAT: offset += sizeof(float); break;
+            case DT_BOOL: offset += sizeof(bool); break;
+        }
+    }
+    return offset;
+}
+
+// Function to get an attribute value from a record
+extern RC getAttr(Record *record, Schema *schema, int attrNum, Value **value) {
+    if (!record || !schema || attrNum < 0 || attrNum >= schema->numAttr) {
+        return RC_INVALID_INPUTS; 
+    }
+
+    int offset;
+    offset = calAttrOffset(schema, attrNum); 
+
+    *value = (Value *)malloc(sizeof(Value)); // Allocates the Value structure.
+    if (*value == NULL) return RC_MEM_ALLOC_FAILED; // Checks for successful allocation.
+
+    char *dataptr = record->data + offset; 
+
+    // Retrieves and assigns the attribute value based on its data type.
+    switch (schema->dataTypes[attrNum]) {
+        case DT_INT:
+            (*value)->v.intV = *(int *)dataptr; 
+            break;
+        case DT_STRING:
+            {
+                int length = schema->typeLength[attrNum];
+                (*value)->v.stringV = (char *)malloc(length + 1); // Includes space for null terminator.
+                if ((*value)->v.stringV == NULL) {
+                    free(*value); // Frees Value structure on allocation failure.
+                    return RC_MEM_ALLOC_FAILED;
+                }
+                strncpy((*value)->v.stringV, dataptr, length);
+                (*value)->v.stringV[length] = '\0'; // Ensures null-termination.
+            }
+            break;
+        case DT_FLOAT:
+            (*value)->v.floatV = *(float *)dataptr; 
+            break;
+        case DT_BOOL:
+            (*value)->v.boolV = *(bool *)dataptr; 
+            break;
+        default:
+            free(*value); // Handles undefined data types.
+            return RC_INVALID_DATATYPE;
+    }
+    (*value)->dt = schema->dataTypes[attrNum]; // Sets the data type of the value.
+
+    return RC_OK;
+}
+
+
+// Function to set an attribute value in a record
+extern RC setAttr(Record *record, Schema *schema, int attrNum, Value *value) {
+    if (!record || !schema || attrNum < 0 || attrNum >= schema->numAttr) {
+        return RC_INVALID_INPUTS;
+    }
+
+    int offset = calAttrOffset(schema, attrNum);
+
+    switch(value->dt) {
+        case DT_INT:
+            memcpy(record->data + offset, &(value->v.intV), sizeof(int));
+            break;
+
+        case DT_STRING:
+            memcpy(record->data + offset, value->v.stringV, schema->typeLength[attrNum]);
+            break;
+
+        case DT_FLOAT:
+            memcpy(record->data + offset, &(value->v.floatV), sizeof(float));
+            break;
+
+        case DT_BOOL:
+            memcpy(record->data + offset, &(value->v.boolV), sizeof(bool));
+            break;
+
+        default:
+            return RC_INVALID_DATATYPE; 
+    }
+    
+    return RC_OK; 
+}
