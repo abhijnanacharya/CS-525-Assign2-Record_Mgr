@@ -46,6 +46,8 @@ typedef int RC;
 #define RC_SCAN_CONDITION_NOT_FOUND 601
 #define RC_PINNED_PAGES_IN_BUFFER 607
 
+#define RC_SERIALIZER_ERROR 900
+
 /* holder for error messages */
 extern char *RC_message;
 
