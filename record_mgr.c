@@ -289,6 +289,71 @@ extern RC insertRecord(RM_TableData *rel, Record *record)
     }
 }
 
+
+
+
+// The "getRecordSize" function is to retrieve the record size
+// Helper function to calculate the size of each data type
+int dataTypeSize(DataType type) {
+    switch(type) {
+        case DT_INT:
+            return sizeof(int);
+        case DT_FLOAT:
+            return sizeof(float);
+        case DT_BOOL:
+            return sizeof(bool);
+        default:
+            return 0; // Handle unknown data types or error conditions
+    }
+}
+
+extern int getRecordSize(Schema *schema) {
+    int recordSizeCount = 0;
+
+    for (int i = 0; i < schema->numAttr; i++) {
+        DataType type = schema->dataTypes[i];
+        if (type == DT_STRING) {
+            recordSizeCount += schema->typeLength[i];
+        } else {
+            recordSizeCount += dataTypeSize(type);
+        }
+    }
+    return recordSizeCount;
+}
+
+
+// This function removes a schema from memory and de-allocates all the memory space allocated to the schema.
+
+extern RC freeSchema(Schema *schema)
+{
+    if (schema == NULL) // Check if the schema pointer is NULL
+        return RC_OK;
+
+    // Freeing space occupied by 'schema' attribute names and typeLength array
+    for (int i = 0; i < schema->numAttr; i++)
+    {
+        if (schema->attrNames[i] != NULL) // Check if the attribute name pointer is not NULL
+        {
+            free(schema->attrNames[i]);
+            schema->attrNames[i] = NULL; // Set the attribute name pointer to NULL after freeing
+        }
+    }
+
+    // Freeing space occupied by 'schema' attribute names array and typeLength array
+    free(schema->attrNames);
+    free(schema->typeLength);
+
+    // Freeing space occupied by 'schema' itself
+    free(schema);
+
+    return RC_OK;
+}
+
+
+
+
+
+
 // The "deleteRecord" function is to delete the existing record from the table.
 extern RC deleteRecord(RM_TableData *rel, RID id)
 {
@@ -368,6 +433,199 @@ extern RC getRecord(RM_TableData *rel, RID id, Record *record)
 
     return RC_OK;
 }
+
+
+
+// The "startScan" function is to initialize all attributes of RM_ScanHandle
+extern RC startScan(RM_TableData *rel, RM_ScanHandle *scan, Expr *cond)
+{
+    // Pre-requisite check
+    if (cond == NULL)
+    {
+        return RC_SCAN_CONDITION_NOT_FOUND;
+    }
+
+    // Opening the table for scanning
+    openTable(rel, "ScanTable");
+
+    // Allocate memory for scan controller
+    RM_RecordController *scanController = (RM_RecordController *)calloc(1, sizeof(RM_RecordController));
+    if (scanController == NULL)
+    {
+        return RC_MEM_ALLOC_FAILED;
+    }
+
+    // Initialize scan controller attributes
+    scanController->condition = cond;
+    scanController->recID.page = 1; // Start from page 1
+    scanController->recID.slot = 0; // Start from slot 0
+
+    // Set scan handle attributes
+    scan->mgmtData = scanController;
+    scan->rel = rel;
+
+    return RC_OK;
+}
+
+
+extern RC next(RM_ScanHandle *scan, Record *record)
+{
+    RM_RecordController *scanController = (RM_RecordController *)scan->mgmtData;
+    RM_RecordController *tableController = (RM_RecordController *)scan->rel->mgmtData;
+    Schema *schema = scan->rel->schema;
+    int recSize = getRecordSize(schema);
+    int totalSlots = PAGE_SIZE / recSize;
+
+    if (scanController->condition == NULL)
+        return RC_SCAN_CONDITION_NOT_FOUND;
+
+    if (tableController->totalRecordCount == 0)
+        return RC_RM_NO_MORE_TUPLES;
+
+    int slot = scanController->totalScanCount % totalSlots;
+    int page = 1 + (scanController->totalScanCount / totalSlots);
+
+    pinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle, page);
+
+    char *pageHandleData = scanController->bmPageHandle.data;
+    char *slotData = pageHandleData + (slot * recSize);
+
+    record->id.page = page;
+    record->id.slot = slot;
+
+    record->data[0] = '-'; // [TOMBSTONE] ☠️ Mark as deleted
+    memcpy(record->data + 1, slotData + 1, recSize - 1);
+
+    scanController->totalScanCount++;
+
+    Value *res = (Value *)malloc(sizeof(Value));
+    evalExpr(record, schema, scanController->condition, &res);
+
+    unpinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle);
+
+    if (res->v.boolV == TRUE)
+    {
+        return RC_OK;
+    }
+
+    if (scanController->totalScanCount < tableController->totalRecordCount)
+    {
+        return next(scan, record);
+    }
+    else
+    {
+        scanController->totalScanCount = 0;
+        return RC_RM_NO_MORE_TUPLES;
+    }
+}
+
+
+extern RC closeScan(RM_ScanHandle *scan)
+{
+    if (scan == NULL) return RC_OK;
+
+    RM_RecordController *scanController = (RM_RecordController *)scan->mgmtData;
+
+    if (scanController != NULL)
+    {
+        if (scanController->totalScanCount > 0)
+        {
+            RM_RecordController *recController = (RM_RecordController *)scan->rel->mgmtData;
+            unpinPage(&recController->buffPoolMgmt, &scanController->bmPageHandle);
+
+            scanController->totalScanCount = 0;
+            scanController->recID.slot = 0;
+            scanController->recID.page = 1;
+        }
+
+        free(scan->mgmtData);
+        scan->mgmtData = NULL;
+    }
+
+    return RC_OK;
+}
+
+
+// The "createSchema" function is to make a new schema and initialize its all attributes
+// Define a helper function to allocate memory and initialize schema attributes
+extern Schema *createSchema(int numAttr, char **attrNames, DataType *dataTypes, int *typeLength, int keySize, int *keys)
+{
+    // Allocate memory for the schema structure
+    Schema *currentSchema = (Schema *)malloc(sizeof(Schema));
+    if (currentSchema == NULL) {
+        // Handle memory allocation failure
+        return NULL;
+    }
+
+    // Initialize the schema attributes
+    currentSchema->numAttr = numAttr;
+
+    // Allocate memory for attribute names and copy each name
+    currentSchema->attrNames = (char **)malloc(numAttr * sizeof(char *));
+    if (currentSchema->attrNames == NULL) {
+        // Handle memory allocation failure
+        free(currentSchema);
+        return NULL;
+    }
+    for (int i = 0; i < numAttr; i++) {
+        currentSchema->attrNames[i] = strdup(attrNames[i]);
+        if (currentSchema->attrNames[i] == NULL) {
+            // Handle memory allocation failure
+            for (int j = 0; j < i; j++) {
+                free(currentSchema->attrNames[j]);
+            }
+            free(currentSchema->attrNames);
+            free(currentSchema);
+            return NULL;
+        }
+    }
+
+    // Allocate memory for data types and copy each type
+    currentSchema->dataTypes = (DataType *)malloc(numAttr * sizeof(DataType));
+    if (currentSchema->dataTypes == NULL) {
+        // Handle memory allocation failure
+        free(currentSchema->attrNames);
+        free(currentSchema);
+        return NULL;
+    }
+    memcpy(currentSchema->dataTypes, dataTypes, numAttr * sizeof(DataType));
+
+    // Allocate memory for type lengths and copy each length
+    currentSchema->typeLength = (int *)malloc(numAttr * sizeof(int));
+    if (currentSchema->typeLength == NULL) {
+        // Handle memory allocation failure
+        free(currentSchema->dataTypes);
+        free(currentSchema->attrNames);
+        free(currentSchema);
+        return NULL;
+    }
+    memcpy(currentSchema->typeLength, typeLength, numAttr * sizeof(int));
+
+    // Set the key size and copy key attributes
+    currentSchema->keySize = keySize;
+    if (keySize > 0) {
+        currentSchema->keyAttrs = (int *)malloc(keySize * sizeof(int));
+        if (currentSchema->keyAttrs == NULL) {
+            // Handle memory allocation failure
+            free(currentSchema->typeLength);
+            free(currentSchema->dataTypes);
+            free(currentSchema->attrNames);
+            free(currentSchema);
+            return NULL;
+        }
+        memcpy(currentSchema->keyAttrs, keys, keySize * sizeof(int));
+    } else {
+        currentSchema->keyAttrs = NULL;
+    }
+
+    return currentSchema;
+}
+
+
+
+
+
+
 
 // The function is used to update a Record
 extern RC updateRecord(RM_TableData *rel, Record *rec)
