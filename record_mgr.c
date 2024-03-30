@@ -180,7 +180,9 @@ extern RC openTable(RM_TableData *rel, char *name)
     SM_PageHandle pageHandle = (SM_PageHandle *)recController->bmPageHandle.data;
 
     // Get the total number of tuples from the page file
-    recController->totalRecordCount = (int *)*pageHandle;
+    //recController->totalRecordCount = (int *)*pageHandle;
+    recController->totalRecordCount = *((int *)pageHandle);
+    
     pageHandle += sz;
 
     // Get the free page number from the page file
@@ -372,7 +374,8 @@ extern RC deleteRecord(RM_TableData *rel, RID id)
         }
 
         recController->freePagesNum = id.page;
-        char *size= (id.slot * recordSize);
+        //char *size= (id.slot * recordSize);
+        char *size = (char *)(id.slot * recordSize);
         char *data = recController->bmPageHandle.data;
         data = data + (int)size;
         // Deleted Record Demarkation using - [TOMBSTONE] ☠️
