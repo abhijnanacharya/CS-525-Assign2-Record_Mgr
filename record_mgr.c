@@ -292,8 +292,64 @@ extern RC insertRecord(RM_TableData *rel, Record *record)
 }
 
 
+// Define a structure for holding functions that calculate size
+typedef struct {
+    int (*getSize)(Schema *, int); // Function pointer to getSize
+} SizeFunction;
+
+// Function to get size of an integer
+int getSizeInt(Schema *schema, int index) {
+    return sizeof(int);  // Return size of int
+}
+
+//Function to get size of a float
+int getSizeFloat(Schema *schema, int index) {
+    return sizeof(float);  //return size of int
+}
+
+// Function to get size of string
+int getSizeString(Schema *schema, int index) {
+    return schema->typeLength[index]; // Return size of string from schema
+}
 
 
+// Function to get size of boolean
+int getSizeBool(Schema *schema, int index) {
+    return sizeof(bool); //return size of bool
+}
+
+
+//// Function to calculate record size based on schema
+extern int getRecordSize(Schema *schema) {
+    int recordSize = 0; // Initialize recordSize variable
+    
+    /// Array of function pointers to size calculation functions
+    SizeFunction sizeFunc[] = {getSizeInt, getSizeFloat, getSizeString, getSizeBool};
+    
+    // Iterate over each attribute in the schema
+    for (int i = 0; i < schema->numAttr; ++i) {
+
+        // Retrieve the appropriate size calculation function based on data type
+        // and accumulate the size to the total recordSize
+        recordSize += sizeFunc[schema->dataTypes[i]].getSize(schema, i);
+    }
+
+    // Return the total record size
+    return recordSize;
+}
+
+//// Function to free memory allocated for a schema
+extern RC freeSchema(Schema *schema) {
+    // Check if schema pointer is NULL, indicating it's already freed
+    if (schema == NULL) 
+        return RC_OK;
+    
+    // Clearing and nullifying the pointer
+    memset(schema, 0, sizeof(Schema)); //// Set memory content of schema to 0
+    free(schema);  //// Free memory allocated for schema
+    schema = NULL; //// Nullify the schema pointer to avoid dangling pointer
+    return RC_OK; //// Return OK status indicating successful memory deallocation
+}
 
 
 // The "deleteRecord" function is to delete the existing record from the table.
@@ -379,11 +435,210 @@ extern RC getRecord(RM_TableData *rel, RID id, Record *record)
 
 
 
+// Function declarations
+extern RC startScan(RM_TableData *rel, RM_ScanHandle *scan, Expr *cond);
+static void initializeScanController(RM_ScanHandle *scan, RM_RecordController *controller, RM_TableData *rel, Expr *cond);
+
+// Function definitions, a Function to start a scan on a table with a given condition
+extern RC startScan(RM_TableData *rel, RM_ScanHandle *scan, Expr *cond)
+{
+    // Pre-requisite check
+    if (cond == NULL)
+    {
+        return RC_SCAN_CONDITION_NOT_FOUND;
+    }
+
+    // Opening the table for scanning
+    openTable(rel, "ScanTable");
+
+    // Getting our details from mgmtData
+    RM_RecordController *tableController = (RM_RecordController *)rel->mgmtData;
+    tableController->totalRecordCount = ATTRIBUTE_SIZE;
+
+    // Initialize the scan controller
+    initializeScanController(scan, (RM_RecordController *)malloc(sizeof(RM_RecordController)), rel, cond);
+
+    return RC_OK;
+}
+
+// Initializes the scan controller
+static void initializeScanController(RM_ScanHandle *scan, RM_RecordController *controller, RM_TableData *rel, Expr *cond)
+{
+    // Set scans management data
+    scan->mgmtData = controller;
+    scan->rel = rel;
+
+    // Initialize scan controller details
+   // Initialize scan controller details
+*controller = (RM_RecordController){
+    .condition = cond,
+    .recID = {.slot = 0, .page = 1},
+    .totalScanCount = 0
+};
+
+}
+
+// Function to retrieve the next record in a scan
+extern RC next(RM_ScanHandle *scan, Record *record)
+{
+    // Extract controllers and schema
+    RM_RecordController *scanController = (RM_RecordController *)scan->mgmtData, *tableController = (RM_RecordController *)scan->rel->mgmtData;
+    Schema *schema = scan->rel->schema;
+
+    int recSize;
+    int totalSlots;
+
+    // Calculate record size and total slots per page
+    recSize = getRecordSize(schema);
+    totalSlots = PAGE_SIZE / recSize;
+
+    // Check if condition is provided
+    if (!scanController->condition) 
+    return RC_SCAN_CONDITION_NOT_FOUND;   // Return error if condition not found
+
+    // Get the total number of tuples
+    int tuplesCount = (*tableController).totalRecordCount;
+    // If there are no tuples, return error
+    if (tuplesCount == 0)
+        return RC_RM_NO_MORE_TUPLES;
+    
+
+    int scanCount;
+    scanCount = (*scanController).totalScanCount; // Get the current scan count
 
 
 
+    while (scanCount <= tuplesCount)
+    {
+        if (scanCount > 0)
+        {
+            scanController->recID.slot++;
+
+            if (scanController->recID.slot >= totalSlots)
+            {
+                scanController->recID.slot = 0;
+                scanController->recID.page++;
+            }
+        }
+        else
+        {
+            scanController->recID.page = 1;
+            scanController->recID.slot = 0;
+        }
 
 
+        // Pinning the page to update
+        pinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle, scanController->recID.page);
+
+    
+
+    // Calculate data position on the page
+
+    char *pageHandleData = scanController->bmPageHandle.data;
+    pageHandleData += scanController->recID.slot * recSize;
+        
+     // Set record ID
+    record->id.page = scanController->recID.page;
+    record->id.slot = scanController->recID.slot;
+
+    char *dataPtr = record->data;
+
+    // [TOMBSTONE] ☠️ Mark as deleted
+
+    // Write '-' to dataPtr and then increment dataPtr
+    *(dataPtr++) = '-';
+
+// Copy data from pageHandleData to dataPtr
+    memcpy(dataPtr, pageHandleData + 1, recSize - 1);
+    dataPtr += recSize - 1;
+
+// Increment scan counts
+   ++scanController->totalScanCount;
+   ++scanCount;
+
+// Allocate memory for result
+   Value *res = (Value *)malloc(sizeof(Value));
+   if (res != NULL) {
+    // Evaluate expression
+    evalExpr(record, schema, scanController->condition, &res);
+}
+
+
+
+        // Means condition satisfied
+        int conditionSatisfied = (res->v.boolV == TRUE);
+        if (conditionSatisfied)
+{
+            unpinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle);
+            return RC_OK;
+}
+
+    }
+
+    // Unpinnig the page
+    unpinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle);
+
+    // Resetting the values if no more tuples
+    scanController->totalScanCount = 0;
+    scanController->recID.slot = 0;
+    scanController->recID.page = 1;
+
+    // Returning ERROR
+    return RC_RM_NO_MORE_TUPLES;
+}
+
+//The function "closeScan" displays a message indicating that all resources are now ready for cleanup.
+
+extern RC closeScan(RM_ScanHandle *scan) {
+    ///// Extract management data pointers
+  void* recData = scan->rel->mgmtData; // Management data pointer of the table
+  void* scanData = scan->mgmtData;  /// Management data pointer of the table
+    
+  // Cast management data pointers to RM_RecordController pointers
+  RM_RecordController* recController = (RM_RecordController*)recData;
+  RM_RecordController* scanController = (RM_RecordController*)scanData;
+
+  //// If scan has scanned at least one record
+    if (scanController->totalScanCount > 0)
+{
+    // Unpinning the page
+    unpinPage(&recController->buffPoolMgmt, &scanController->bmPageHandle);
+
+    // Resetting the values for closing using ternary operator
+    scanController->totalScanCount = (scanController->totalScanCount > 0) ? 0 : scanController->totalScanCount;
+    scanController->recID.slot = (scanController->totalScanCount > 0) ? 0 : scanController->recID.slot;
+    scanController->recID.page = (scanController->totalScanCount > 0) ? 1 : scanController->recID.page;
+}
+    // Freeing the memory and setting mgmtData to NULL using ternary operator
+    free(scan->mgmtData);
+
+    
+//// Set mgmtData to NULL if the scan has scanned at least one record, otherwise keep it unchanged
+    if (scanController->totalScanCount > 0) {
+    scan->mgmtData = NULL;
+}  else {
+    scan->mgmtData = scan->mgmtData;
+}
+    return RC_OK;
+}
+
+
+// The "createSchema" function to make a new schema and initialize its all attributes
+extern Schema *createSchema(int numAttr, char **attrNames, DataType *dataTypes, int *typeLength, int keySize, int *keys)
+{
+    Schema *currentSchema = (Schema *)malloc(sizeof(Schema));
+
+    // setting up of attribute :
+    (*currentSchema).numAttr = numAttr;
+    (*currentSchema).attrNames = attrNames;
+    (*currentSchema).dataTypes = dataTypes;
+    (*currentSchema).typeLength = typeLength;
+    (*currentSchema).keySize = keySize;
+    (*currentSchema).keyAttrs = keys;
+
+    // returning schema after updating all attributes
+    return currentSchema;
+}
 
 
 
