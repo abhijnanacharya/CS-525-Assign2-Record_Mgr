@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,9 +181,7 @@ extern RC openTable(RM_TableData *rel, char *name)
     SM_PageHandle pageHandle = (SM_PageHandle *)recController->bmPageHandle.data;
 
     // Get the total number of tuples from the page file
-    //recController->totalRecordCount = (int *)*pageHandle;
-    recController->totalRecordCount = *((int *)pageHandle);
-    
+    recController->totalRecordCount = (int *)*pageHandle;
     pageHandle += sz;
 
     // Get the free page number from the page file
@@ -291,10 +290,53 @@ extern RC insertRecord(RM_TableData *rel, Record *record)
     }
 }
 
+// The "getRecordSize" function is to retrieve the record size
+extern int getRecordSize(Schema *schema)
+{
+    int recordSizeCount = 0;
+    int szInt = sizeof(int);
+    int szFloat = sizeof(float);
+    int szBool = sizeof(bool);
+    // for iteration on numAttr
+    int eachCount = 0;
+    for (; eachCount < schema->numAttr;)
+    {
+        switch (schema->dataTypes[eachCount])
+        {
+        // Cases for checking type of data
+        case DT_INT:
+            // INT to INT
+            recordSizeCount += szInt;
+            break;
+        case DT_FLOAT:
+            // FLOAT to FLOAT
+            recordSizeCount += szFloat;
+            break;
+        case DT_STRING:
+            // STRING then recordSizeCount = typeLength
+            recordSizeCount = recordSizeCount + schema->typeLength[eachCount];
+            break;
+        case DT_BOOL:
+            // BOOLEAN to BOOLEAN
+            recordSizeCount += szBool;
+            break;
+        }
+        eachCount += 1;
+    }
+    return recordSizeCount + 1;
+}
 
+// This function removes a schema from memory and de-allocates all the memory space allocated to the schema.
+extern RC freeSchema(Schema *schema)
+{
+    if (schema == NULL) // Already Free
+        return RC_OK;
+    // Freeing space occupied by 'schema'
+    schema = ((void *)0);
+    free(schema);
 
-
-
+    return RC_OK;
+}
 
 // The "deleteRecord" function is to delete the existing record from the table.
 extern RC deleteRecord(RM_TableData *rel, RID id)
@@ -314,8 +356,7 @@ extern RC deleteRecord(RM_TableData *rel, RID id)
         }
 
         recController->freePagesNum = id.page;
-        //char *size= (id.slot * recordSize);
-        char *size = (char *)(id.slot * recordSize);
+        char *size = (id.slot * recordSize);
         char *data = recController->bmPageHandle.data;
         data = data + (int)size;
         // Deleted Record Demarkation using - [TOMBSTONE] ☠️
@@ -377,16 +418,209 @@ extern RC getRecord(RM_TableData *rel, RID id, Record *record)
     return RC_OK;
 }
 
+// The "startScan" function is to initialize all attributes of RM_ScanHandle
+extern RC startScan(RM_TableData *rel, RM_ScanHandle *scan, Expr *cond)
+{
+    // Pre-requisite check
+    if (cond == NULL)
+    {
+        return RC_SCAN_CONDITION_NOT_FOUND;
+    }
 
+    // Opening the table for scanning
+    if (openTable(rel, "ScanTable") == RC_OK)
+    {
+        // Getting our details from mgmtData
+        RM_RecordController *tableController = rel->mgmtData;
+        tableController->totalRecordCount = ATTRIBUTE_SIZE;
 
+        RM_RecordController *scanController = malloc(sizeof(RM_RecordController));
 
+        scan->mgmtData = (RM_RecordController *)scanController;
 
+        scan->rel = rel;
 
+        if (cond != NULL)
+        {
+            scanController->condition = cond;
+        }
 
+        // from slot 1
+        scanController->recID.slot = 0;
 
+        // initialization
+        scanController->totalScanCount = 0;
 
+        // from page 1
+        scanController->recID.page = 1;
+    }
+    else
+    {
+        return RC_TABLE_ERROR;
+    }
 
+    return RC_OK;
+}
 
+extern RC next(RM_ScanHandle *scan, Record *record)
+{
+
+    RM_RecordController *scanController = scan->mgmtData;
+    // Pre-requisite check
+    if (scanController->condition == NULL)
+    {
+        return RC_SCAN_CONDITION_NOT_FOUND;
+    }
+
+    // Getting our details from mgmtData
+    RM_RecordController *tableController = (RM_RecordController *)scan->rel->mgmtData;
+
+    Schema *schema = scan->rel->schema;
+    if (sizeof(tableController) != NULL && sizeof(schema) != NULL)
+    {
+        // get size of corresponding record
+        int recSize = getRecordSize(schema);
+        if (recSize == 0)
+        {
+            return RC_RECORD_SIZE_FATAL_ERR;
+        }
+        int totalSlots = (int)(PAGE_SIZE / recSize);
+
+        int tuplesCount = tableController->totalRecordCount;
+        if (tuplesCount == 0)
+            return RC_RM_NO_MORE_TUPLES;
+
+        int scanCount = (int)scanController->totalScanCount;
+
+        while (scanCount <= tuplesCount)
+        {
+            if (scanCount > 0)
+            {
+                scanController->recID.slot = (int)scanController->recID.slot + 1;
+
+                if (scanController->recID.slot >= totalSlots)
+                {
+                    scanController->recID.slot = 0;
+                    int currPageCount = scanController->recID.page;
+                    scanController->recID.page = currPageCount + 1; // Increase Page Count by 1
+                }
+            }
+            else
+            {
+                scanController->recID.page = 1;
+                scanController->recID.slot = 0;
+            }
+
+            // Pinning the page to update
+            if (pinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle, scanController->recID.page) == RC_OK)
+            {
+                // Retrieving the data of the page
+                char *pageHandleData = scanController->bmPageHandle.data;
+                int offset = scanController->recID.slot * recSize;
+                pageHandleData = pageHandleData + offset;
+
+                record->id.page = (RM_RecordController *)scanController->recID.page;
+                record->id.slot = (RM_RecordController *)scanController->recID.slot;
+
+                char *dataPtr = record->data;
+
+                // [TOMBSTONE] ☠️ Mark as deleted
+                *dataPtr = (char)'-';
+                dataPtr += 1; // Increment the pointer by 1
+                // Copying data
+                memcpy(dataPtr, pageHandleData + 1, recSize - 1);
+
+                scanController->totalScanCount = (scanController->totalScanCount) + 1;
+                scanCount += 1;
+
+                Value *res = malloc(sizeof(Value));
+
+                if (evalExpr(record, schema, scanController->condition, &res) == RC_OK)
+                {
+                    if (res->v.boolV == TRUE) // Condition Satisfied : Proceed to Unpin
+                    {
+                        // Unpinnig the page
+                        unpinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle);
+
+                        // Return SUCCESS
+                        return RC_OK;
+                    }
+                }
+            }
+            else
+            {
+                return RC_FATAL_ERROR;
+            }
+        }
+
+        // Unpinnig the page
+        if (unpinPage(&tableController->buffPoolMgmt, &scanController->bmPageHandle) != RC_OK)
+        {
+            return RC_FATAL_ERROR;
+        }
+
+        // Resetting the values if no more tuples
+        scanController->totalScanCount = 0;
+        scanController->recID.slot = 0;
+        scanController->recID.page = 1;
+
+        // Returning ERROR
+        return RC_RM_NO_MORE_TUPLES;
+    }
+
+    return RC_FATAL_ERROR;
+}
+
+// The "closeScan" function is to show the indication that all resources can now be cleaned up
+extern RC closeScan(RM_ScanHandle *scan)
+{
+    RC returnCode = RC_OK;
+    RM_RecordController *recController = scan->rel->mgmtData;
+    RM_RecordController *scanController = scan->mgmtData;
+
+    for (; (int)scanController->totalScanCount > 0;)
+    {
+        // Unpinnig the page
+        if (unpinPage(&recController->buffPoolMgmt, &scanController->bmPageHandle) != RC_OK)
+            return returnCode = RC_FATAL_ERROR;
+
+        // Resetting the values for closing
+        scanController->totalScanCount = 0;
+        scanController->recID.slot = 0;
+        scanController->recID.page = 1;
+    }
+
+    scan->mgmtData = ((void *)0);
+    free((RM_ScanHandle *)scan->mgmtData);
+    return (returnCode == RC_OK ? RC_OK : RC_FATAL_ERROR);
+}
+
+// The "createSchema" function is to make a new schema and init all the attributes
+extern Schema *createSchema(int numAttr, char **attrNames, DataType *dataTypes, int *typeLength, int keySize, int *keys)
+{
+
+    if (sizeof(Schema) >= 0)
+    {
+        Schema *currSchema = malloc(sizeof(Schema));
+        if (sizeof(currSchema) != NULL)
+        {
+            // setting up of attribute here:
+            currSchema->numAttr = numAttr ? numAttr : 0;
+            currSchema->attrNames = attrNames ? attrNames : NULL;
+            currSchema->dataTypes = dataTypes ? dataTypes : NULL;
+            ;
+            currSchema->typeLength = typeLength ? typeLength : 0;
+            currSchema->keySize = keySize ? keySize : 0;
+            currSchema->keyAttrs = keys ? keys : NULL;
+            // returning schema after updating all attributes
+            return currSchema;
+        }
+        else
+        {
+            return RC_SCHEMA_CREATION_FAILURE;
+        }
+    }
+}
 
 // The function is used to update a Record
 extern RC updateRecord(RM_TableData *rel, Record *rec)
@@ -540,11 +774,11 @@ extern RC getAttr(Record *rec, Schema *schema, int attrNum, Value **value)
         // creating space for string
         attr->dt = schema->dataTypes[attrNum];
         attr->v.stringV = malloc(length + 1);
-        if (attr->v.stringV != NULL) {
+        if (attr->v.stringV != NULL)
+        {
             memcpy(attr->v.stringV, dataptr, length);
-            attr->v.stringV[length] = '\0'; // Null terminator 
+            attr->v.stringV[length] = '\0'; // Null terminator
         }
-
     }
     else if (schema->dataTypes[attrNum] == DT_FLOAT)
     {

@@ -47,6 +47,9 @@ typedef int RC;
 #define RC_PINNED_PAGES_IN_BUFFER 607
 
 #define RC_SERIALIZER_ERROR 900
+#define RC_TABLE_ERROR 901
+#define RC_RECORD_SIZE_FATAL_ERR 902
+#define RC_SCHEMA_CREATION_FAILURE 903
 
 /* holder for error messages */
 extern char *RC_message;

@@ -1,5 +1,6 @@
 CFLAGS = -g -Wall -Wextra -Wpedantic -Wno-unused-parameter
 
+CC= clang
 .PHONY: all
 all: test_assign1
 
