@@ -11,7 +11,11 @@
 
 ---
 
-# record_mgr.c
+The record manager handles tables with a fixed schema. Clients can insert records, delete records, update records, and scan through the records in a table.
+
+---
+
+## Description
 
 **Function initRecordManager**
 
