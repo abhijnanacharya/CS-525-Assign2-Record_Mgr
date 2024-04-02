@@ -13,6 +13,288 @@
 
 # record_mgr.c
 
+**Function initRecordManager**
+
+This file describes the `initRecordManager` function to initialize components of the record manager.
+
+**Function Signature**
+
+```c
+extern RC initRecordManager(void *mgmtData)
+```
+
+**Purpose:** This function initializes the record manager.
+
+**Parameters:**
+
+- `mgmtData`: A pointer to management data can be utilized for passing configuration options or necessary state required for initialization.
+
+**Return:**
+
+- `RC_OK`: Indicates successful execution of the function.
+
+**Details:**
+
+1. Initializes global data structures or resources required by the record manager to operate. This could involve tasks such as allocating memory for management structures, setting up essential background services, or loading configuration settings.
+2. If `mgmtData` is utilized, the function will interpret the provided data to configure the record manager in accordance with the requirements of the application.
+3. Prepares the record manager to create, open, and manage tables and records.
+4. May also entail initializing dependencies, like the storage manager or buffer manager, to ensure they are prepared for use by the record manager.
+5. Returns `RC_OK` upon successful initialization, signifying that the record manager is prepared to process requests.
+
+---
+
+**Function shutdownRecordManager**
+
+This file describes the `shutdownRecordManager` function to shut down or terminate the record manager
+
+**Function Signature:**
+
+```c
+extern RC shutdownRecordManager()
+```
+
+**Purpose:** This function shuts down the record manager and releases all resources it has allocated.
+
+**Parameters:** None.
+
+**Return:**
+
+- `RC_OK`: Indicates successful execution of the function.
+
+**Details:**
+
+1. Releases any global data structures or resources that were allocated or opened during the initialization or regular operation of the record manager.
+2. Guarantees that all managed tables are closed correctly and any unsaved data is saved to disk to prevent data loss.
+3. If the record manager utilizes external services or systems (such as a storage manager or a buffer manager), this function ensures that those are also properly terminated or released.
+4. Executes cleanup tasks like freeing memory allocated for management structures and ensuring there are no memory leaks.
+5. Following the execution of this function, the record manager will be unable to manage tables or records until `initRecordManager` is invoked again to reinitialize it.
+6. Returns `RC_OK` to signify the successful completion of the shutdown process and appropriate release of all resources.
+
+---
+
+**Function createTable**
+
+This file describes the `createTable` function to create a new table
+
+**Function Signature:**
+
+```c
+extern RC createTable(char *name, Schema *schema);
+```
+
+**Purpose:** This function creates a new table with a specified name and schema.
+
+**Parameters:**
+
+- `name`: A string representing the name of the table to be created.
+- `schema`: A pointer to a `Schema` structure that defines the schema of the table, including the types, names, and sizes of the columns, along with any key attributes.
+
+**Return:**
+
+- `RC_OK`: Indicates successful creation of the table.
+
+**Details:**
+
+1. Initializes the required data structures for representing a new table within the record manager's system. This involves allocating memory for the table's management data and configuring it according to the provided schema.
+2. Generates a new page file for the table, utilizing the table's name as the identifier. This file serves as the storage location for the records associated with the table.
+3. Records initial metadata to the page file, comprising schema information and any other essential management details like the number of records or structures for managing free space.
+4. Serializes the schema and stores it in a dedicated section of the table's page file or management structures, enabling retrieval and interpretation during table operations.
+5. Updates the record manager's internal catalog or directory with information about the newly created table, facilitating operations such as insertions, deletions, and scans on the table.
+6. If the table creation process is successful and the table is ready for use, the function returns `RC_OK`. Any encountered errors during the process result in an appropriate error code being returned to indicate the failure and its cause.
+
+---
+
+**Function openTable**
+
+This file describes `openTable` function to initiate access to a specified table
+
+**Function Signature:**
+
+```c
+extern RC openTable(RM_TableData *rel, char *name);
+```
+
+**Purpose:** This function opens an existing table for operations like insertions, deletions, updates, and scans.
+
+**Parameters:**
+
+- `rel`: A pointer to an `RM_TableData` structure where information about the opened table will be stored.
+- `name`: A string representing the name of the table to be opened.
+
+**Return:**
+
+- `RC_OK`: Indicates the table was successfully opened.
+
+**Details:**
+
+1. Retrieves the metadata of the table from the storage system, utilizing the provided table name as the identifier. This process involves accessing and reading the schema along with any additional management data essential for table operations.
+2. Initializes the `RM_TableData` structure using the retrieved metadata. This includes configuring the schema pointer to accurately represent the table's schema and filling in the necessary management data fields.
+3. If the table has a dedicated page file, this function ensures the file is accessible and ready for data operations. This may involve interfacing with the underlying storage manager to open the file.
+4. Validates the presence of the table and its accessibility. If the table is not found or cannot be opened due to issues such as permissions or corruption, an error code is returned.
+5. Establishes any internal structures or state within the record manager that are necessary for monitoring ongoing operations on the table, such as maintaining open scans or tracking buffered changes.
+6. Signals the successful opening of the table and its readiness for data operations by returning `RC_OK`. In case of failure during any step of the process, an appropriate error code is returned to signify the issue.
+
+---
+
+**Function closeTable**
+
+This file describes `closeTable` function to terminate access to a specific table, release associated resources and finalize operations related to it.
+
+**Function Signature:**
+
+```c
+extern RC closeTable(RM_TableData *rel);
+```
+
+**Purpose:** This function closes an opened table, ensuring that all changes are flushed to storage and all resources are released.
+
+**Parameters:**
+
+- `rel`: A pointer to an `RM_TableData` structure that represents the table to be closed.
+
+**Return:**
+
+- `RC_OK`: Indicates successful closure of the table.
+
+**Details:**
+
+1. Records any modifications or updates made to the table back to the storage system. This includes flushing buffered records, updating metadata, and ensuring the schema and management information remain current.
+2. Releases any resources allocated for managing the table within the record manager. This may involve freeing memory utilized for the schema, management data, or any buffers and temporary structures.
+3. Shuts down the page file linked with the table, if it was opened, ensuring all data is securely stored. This typically involves invoking functionality in the storage manager to properly close the file.
+4. Adjusts the record manager's internal state to indicate that the table is no longer open. This might entail removing the table from an internal directory or list of open tables.
+5. Following the execution of this function, the table becomes unavailable for data operations until it is reopened using `openTable`.
+6. Returns `RC_OK` to signify the successful closure of the table and the clean release of all resources. If any issues arise during the closure process, an appropriate error code is returned to indicate the problem.
+
+---
+
+**Function deleteTable**
+
+This file describes `deleteTable` function to remove a table from the database, including its associated data and metadata.
+
+**Function Signature:**
+
+```c
+extern RC deleteTable(char *name);
+```
+
+**Purpose:** This function deletes a table along with its associated data from the system.
+
+**Parameters:**
+
+- `name`: A string representing the name of the table to be deleted.
+
+**Return:**
+
+- `RC_OK`: Indicates the table was successfully deleted.
+
+**Details:**
+
+1. Locates the table by the given name, which entails searching through the system's catalog or directory of tables to locate the relevant table data and page file.
+2. Eliminates the table's metadata and schema information from the record manager's internal structures, effectively deregistering the table from the system.
+3. Deletes the associated page file linked with the table, ensuring the removal of all records and data stored within the table. This action may involve invoking functions from the storage manager or file system to delete the file.
+4. Clears any in-memory data structures, caches, or buffers pertaining to the table within the record manager, thereby releasing resources and preventing access to outdated data.
+5. Upon completion of this function, the table and all its records are permanently erased, making the table's name available for reuse in creating new tables.
+6. Returns `RC_OK` to signify the successful deletion. If the table cannot be located or if there are issues accessing the file system to delete the table's data, an appropriate error code is returned to indicate the failure.
+
+---
+
+**Function getNumTuples**
+
+This file describes `getNumTuples` function to return the total number of tuples present in a table
+
+**Function Signature:**
+
+```c
+extern int getNumTuples(RM_TableData *rel);
+```
+
+**Purpose:** This function retrieves the number of tuples (records) currently stored in the specified table.
+
+**Parameters:**
+
+- `rel`: A pointer to an `RM_TableData` structure representing the table for which the number of tuples is to be retrieved.
+
+**Return:**
+
+- An integer representing the number of tuples (records) in the table.
+
+**Details:**
+
+1. Retrieves the metadata of the table, which includes details regarding the number of tuples stored in the table.
+2. Provides the current count of tuples stored in the table.
+3. The count can be directly obtained from the table's metadata, which is typically maintained by the record manager to monitor the number of tuples in the table.
+4. This function exclusively retrieves and returns the count of tuples without modifying any data within the table or the record manager.
+5. In case the table is empty, the function returns 0.
+
+---
+
+**Function insertRecord**
+
+This file describes `insertRecord` function to insert a new record into a table
+
+**Function Signature:**
+
+```c
+extern RC insertRecord(RM_TableData *rel, Record *record)
+```
+
+**Purpose:** This function inserts a new record into the table.
+
+**Parameters:**
+
+- `rel`: The table data structure.
+- `record`: A pointer to the record to be inserted.
+
+**Return:**
+
+- `RC_OK`: Indicates successful execution of the function.
+  
+**Details:**
+
+1.Find an empty slot in the table for the new record by examining the table's metadata.
+2.Use the getRecordSize function to calculate the size of the new record and ensure it fits on a page.
+3.Locate a page with enough free space for the record, or allocate a new page if necessary.
+4.Create a Record ID (RID) for the new record by combining the page number and slot number where it's inserted.
+5.Copy the data from the new record into the designated slot on the page.
+6.Mark the page as dirty to indicate that changes need to be written to disk.
+7.Release the lock on the page by unpinning it.
+8.If the insertion is successful, return RC_OK.
+
+---
+
+**Function deleteRecord**
+
+This file describes `deleteRecord` function to remove records from a table
+
+**Function Signature:**
+
+```c
+extern RC deleteRecord(RM_TableData *rel, RID id)
+```
+
+**Purpose:** This function deletes a record from the table.
+
+**Parameters:**
+
+- `rel`: The table data structure.
+- `id`: The Record Identifier (RID) of the record to be deleted.
+
+**Return:**
+
+- `RC_OK`: Indicates successful execution of the function.
+  
+**Details:**
+
+1.Retrieves the table's management data to locate the page and slot of the record to be deleted.
+2.Pins the page containing the target record.
+3.Marks the record as deleted, typically by setting a flag in the record's metadata or by updating a table-level data structure to indicate that the slot is now free.
+4.Marks the page as dirty to indicate changes.
+5.Unpins the page.
+6.Updates any necessary metadata to reflect the deletion, such as adjusting the count of records or updating space management data structures.
+7.Returns RC_OK if the delete operation is successful.
+
+---
+
 
 **function getRecordSize**
 
@@ -49,7 +331,7 @@ extern int getRecordSize(Schema *schema)
 
 **function freeSchema**
 
-This file describes the freeSchema function for releasing memory allocated for a schema.
+This file describes the `freeSchema` function for releasing memory allocated for a schema.
 
 
 **Function Signature:**
@@ -79,7 +361,7 @@ extern RC freeSchema(Schema *schema)
 
 **function deleteRecord**
 
-This file describes the deleteRecord function for deleting an existing record from the table.
+This file describes the `deleteRecord` function for deleting an existing record from the table.
 
 
 **Function Signature:**
